@@ -48,9 +48,14 @@ export function useLiveData(periodDays, refreshKey = 0) {
       const charges = ce.filter((e) => e.kind === "charge");
       const credits = ce.filter((e) => e.kind === "credit");
       const booked = charges.length;
-      const showed = booked - credits.length;          // a credit = no-show; everything else showed
+      // showed = total bookings minus credits (default ForceCharge behavior).
+      // For manually-added bookings, the user explicitly sets the `showed` flag,
+      // which is a stronger signal than the credit-count subtraction. We honor
+      // that: subtract no-shows (showed=false) AND credits.
+      const manualNoShows = charges.filter((e) => e.manual && e.showed === false).length;
+      const showed = booked - credits.length - manualNoShows;
       const charged = charges.reduce((s, e) => s + Number(e.amount || 0), 0);
-      const credited = credits.reduce((s, e) => s + Number(e.amount || 0), 0); // usually 0; included for completeness
+      const credited = credits.reduce((s, e) => s + Number(e.amount || 0), 0);
 
       const spend = cm.reduce((s, m) => s + Number(m.spend || 0), 0);
       const meta_leads = cm.reduce((s, m) => s + Number(m.meta_leads || 0), 0);
