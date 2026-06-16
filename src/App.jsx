@@ -33,8 +33,12 @@ function assess(d) {
   if (d.we_pay_spend) {
     if (d.cps > d.ppsa_rate && d.showed > 0) flags.push({ level: "red", metric: "Cost/Show", msg: "Losing per show — cut spend or raise rate" });
     else if (d.cps > 0.85 * d.ppsa_rate && d.showed > 0) flags.push({ level: "amber", metric: "Cost/Show", msg: "Margin per show thin — optimize" });
-    if (d.cpl > d.beCpl && d.beCpl > 0) flags.push({ level: "red", metric: "CPL", msg: "CPL above break-even — tighten targeting" });
-    else if (d.cpl > 0.85 * d.beCpl && d.beCpl > 0) flags.push({ level: "amber", metric: "CPL", msg: "CPL climbing — watch targeting" });
+    // CPL flag: use target_cpl if set, otherwise fall back to break-even
+    const cplCeiling = Number(d.target_cpl) > 0 ? Number(d.target_cpl) : d.beCpl;
+    if (cplCeiling > 0 && d.leads >= 5) {
+      if (d.cpl > cplCeiling) flags.push({ level: "red", metric: "CPL", msg: d.target_cpl ? "CPL above target — refresh creatives" : "CPL above break-even — tighten targeting" });
+      else if (d.cpl > 0.85 * cplCeiling) flags.push({ level: "amber", metric: "CPL", msg: "CPL climbing — watch creatives" });
+    }
   }
   const br = d.target_booked ? d.booked / d.target_booked : 1;
   if (br < 0.6) flags.push({ level: "red", metric: "Bookings", msg: "Bookings low — push setter on follow-ups" });
@@ -103,7 +107,9 @@ function Dashboard({ user, profile }) {
   const [openId, setOpenId] = useState(null);
   const [sortKey, setSortKey] = useState("risk");
   const [addClient, setAddClient] = useState(false);
+  const [editClient, setEditClient] = useState(null); // the client object being edited
   const [addMember, setAddMember] = useState(false);
+  const [addEvent, setAddEvent] = useState(null); // { kind, client }
   const [team, setTeam] = useState([]);
   const [refreshTick, setRefreshTick] = useState(0);
   const [lastSync, setLastSync] = useState(new Date());
@@ -276,7 +282,9 @@ function Dashboard({ user, profile }) {
                     {isAdmin && <span className={"r mono strong " + lvl}>{dash ? "—" : money(d.margin)}</span>}
                     <span className="status"><i className={"dot " + lvl} /><span className="status-msg">{headline}</span></span>
                   </button>
-                  {open && <Detail d={d} a={a} flags={flags} isAdmin={isAdmin} period={period} />}
+                  {open && <Detail d={d} a={a} flags={flags} isAdmin={isAdmin} period={period}
+                    onAddEvent={(kind, client) => setAddEvent({ kind, client })}
+                    onEditClient={() => setEditClient(d)} />}
                 </div>
               );
             })}
@@ -293,6 +301,19 @@ function Dashboard({ user, profile }) {
         if (error) alert(error.message);
         else setRefreshTick((t) => t + 1);
         setAddClient(false);
+      }} />}
+      {editClient && <AddClientForm team={team} existing={editClient} onClose={() => setEditClient(null)} onAdd={async (c) => {
+        const { id, ...patch } = c;
+        const { error } = await supabase.from("clients").update(patch).eq("id", id);
+        if (error) alert(error.message);
+        else setRefreshTick((t) => t + 1);
+        setEditClient(null);
+      }} />}
+      {addEvent && <AddEventForm event={addEvent} onClose={() => setAddEvent(null)} onAdd={async (row) => {
+        const { error } = await supabase.from("events").insert(row);
+        if (error) alert(error.message);
+        else setRefreshTick((t) => t + 1);
+        setAddEvent(null);
       }} />}
       {addMember && <AddMemberForm onClose={() => setAddMember(false)} onAdd={async (m) => {
         alert("To add a real teammate: have them sign in once at the login screen — then you can change their role here. (Email invites coming.)");
@@ -312,7 +333,7 @@ function Stat({ label, value, sub, icon, big, tone }) {
   );
 }
 
-function Detail({ d, a, flags, isAdmin, period }) {
+function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient }) {
   if (d.pending) {
     return (
       <div className="detail pending-detail">
@@ -420,6 +441,15 @@ function Detail({ d, a, flags, isAdmin, period }) {
             <b>{f.metric}</b> — {f.msg}
           </div>
         ))}
+        {isAdmin && (
+          <div className="add-event-row">
+            <button className="btn ghost small" onClick={() => onAddEvent("lead", d)}><Plus size={12} /> Add lead</button>
+            <button className="btn ghost small" onClick={() => onAddEvent("charge", d)}><Plus size={12} /> Add booking</button>
+            <button className="btn ghost small" onClick={() => onAddEvent("credit", d)}><Plus size={12} /> Add no-show</button>
+            <span style={{ flex: 1 }} />
+            <button className="btn ghost small" onClick={onEditClient}>Edit client</button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -503,28 +533,55 @@ function Seg({ value, onChange, options }) {
   return <div className="seg fld-seg">{options.map((o) => <button key={o.v} className={value === o.v ? "on" : ""} onClick={() => onChange(o.v)}>{o.label}</button>)}</div>;
 }
 
-function AddClientForm({ onAdd, onClose, team }) {
+function AddClientForm({ onAdd, onClose, team, existing }) {
   const owners = team.map((t) => t.name).filter(Boolean);
-  const [name, setName] = useState(""); const [area, setArea] = useState(""); const [service, setService] = useState("Roofing");
-  const [type, setType] = useState("PPSA"); const [fund, setFund] = useState("rm"); const [account, setAccount] = useState("universal");
-  const [campaignMatch, setCampaignMatch] = useState(""); const [adAccount, setAdAccount] = useState("act_52692019451927");
-  const [rate, setRate] = useState(200); const [ret, setRet] = useState(0);
-  const [tB, setTB] = useState(24); const [tL, setTL] = useState(100);
-  const [owner, setOwner] = useState(owners[0] || "");
+  const isEdit = !!existing;
+  const [name, setName] = useState(existing?.name || "");
+  const [area, setArea] = useState(existing?.area || "");
+  const [service, setService] = useState(existing?.service || "Roofing");
+  const [type, setType] = useState(existing?.type || "PPSA");
+  const [fund, setFund] = useState(existing ? (existing.we_pay_spend ? "rm" : "client") : "rm");
+  // determine account mode from existing client
+  const initAcct = existing
+    ? (existing.ad_account_id === "act_52692019451927" ? "universal" : "own")
+    : "universal";
+  const [account, setAccount] = useState(initAcct);
+  const [campaignMatch, setCampaignMatch] = useState(existing?.campaign_match || "");
+  const [adAccount, setAdAccount] = useState(existing?.ad_account_id || "act_52692019451927");
+  const [rate, setRate] = useState(existing?.ppsa_rate ?? 200);
+  const [ret, setRet] = useState(existing?.retainer ?? 0);
+  const [targetCpl, setTargetCpl] = useState(existing?.target_cpl ?? 0);
+  const [tB, setTB] = useState(existing?.target_booked ?? 24);
+  const [tL, setTL] = useState(existing?.target_leads ?? 100);
+  const [owner, setOwner] = useState(existing?.owner || owners[0] || "");
+  const [active, setActive] = useState(existing?.active ?? true);
+
   const submit = () => {
     if (!name.trim()) return;
-    const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    onAdd({
-      id, name: name.trim(), area: area.trim(), service, owner, type,
+    const payload = {
+      name: name.trim(), area: area.trim(), service, owner, type,
       we_pay_spend: fund === "rm",
       ad_account_id: account === "own" ? adAccount : "act_52692019451927",
       campaign_match: account === "universal" ? (campaignMatch.trim() || name.trim().split(" ")[0]) : null,
       ppsa_rate: Number(rate) || 0, retainer: Number(ret) || 0,
-      target_booked: Number(tB) || 0, target_leads: Number(tL) || 0, active: true,
-    });
+      target_cpl: Number(targetCpl) || 0,
+      target_booked: Number(tB) || 0, target_leads: Number(tL) || 0,
+      active,
+    };
+    if (isEdit) {
+      onAdd({ ...payload, id: existing.id });           // update
+    } else {
+      const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      onAdd({ ...payload, id });                         // insert
+    }
   };
+
   return (
-    <Modal title="Add client" sub="Lands as pending until the next Meta + Slack sync" onClose={onClose} onSubmit={submit} submitLabel="Add client">
+    <Modal
+      title={isEdit ? `Edit ${existing.name}` : "Add client"}
+      sub={isEdit ? "Changes save immediately. Spend updates on the next Meta pull." : "Lands as pending until the next Meta + Slack sync"}
+      onClose={onClose} onSubmit={submit} submitLabel={isEdit ? "Save changes" : "Add client"}
+    >
       <div className="field"><label>Company name</label><input value={name} onChange={(e) => setName(e.target.value)} placeholder="XYZ Roofing" /></div>
       <div className="grid2">
         <div className="field"><label>Service</label><select value={service} onChange={(e) => setService(e.target.value)}><option>Roofing</option><option>Gutters</option><option>Cabinets</option></select></div>
@@ -537,7 +594,13 @@ function AddClientForm({ onAdd, onClose, team }) {
         <div className="field"><label>Ad account</label><Seg value={account} onChange={setAccount} options={[{ v: "own", label: "Own" }, { v: "universal", label: "Universal" }]} /></div>
       </div>
       {account === "own" && <div className="field"><label>Ad account ID</label><input value={adAccount} onChange={(e) => setAdAccount(e.target.value)} placeholder="act_..." /></div>}
-      {account === "universal" && <div className="field"><label>Campaign name match</label><input value={campaignMatch} onChange={(e) => setCampaignMatch(e.target.value)} placeholder="e.g. KAB (matched inside RM-roofs-...-...)" /></div>}
+      {account === "universal" && (
+        <div className="field">
+          <label>Campaign name match</label>
+          <input value={campaignMatch} onChange={(e) => setCampaignMatch(e.target.value)} placeholder='e.g. KAB,Kab Roofing,KAB-Roof' />
+          <div className="hint" style={{ marginTop: 6 }}>Comma-separated. Spend is counted on universal-account campaigns whose name contains <b>any</b> of these. Use multiple if your campaigns use different naming patterns.</div>
+        </div>
+      )}
       <div className="grid2">
         {type !== "Retainer" && <div className="field"><label>PPSA rate / show ($)</label><input type="number" value={rate} onChange={(e) => setRate(e.target.value)} /></div>}
         {type !== "PPSA" && <div className="field"><label>Retainer ($/mo)</label><input type="number" value={ret} onChange={(e) => setRet(e.target.value)} /></div>}
@@ -546,7 +609,46 @@ function AddClientForm({ onAdd, onClose, team }) {
         <div className="field"><label>Target booked / mo</label><input type="number" value={tB} onChange={(e) => setTB(e.target.value)} /></div>
         <div className="field"><label>Target leads / mo</label><input type="number" value={tL} onChange={(e) => setTL(e.target.value)} /></div>
       </div>
-      <div className="hint">Slack channels for this client: add them in Supabase → <b>slack_channels</b> table (we'll move this into the UI next).</div>
+      <div className="field"><label>Target CPL ($) <span style={{ color: "#586679", textTransform: "none", letterSpacing: 0 }}>· when CPL exceeds this, the "refresh creatives" flag fires</span></label><input type="number" value={targetCpl} onChange={(e) => setTargetCpl(e.target.value)} placeholder="e.g. 25" /></div>
+      {isEdit && (
+        <div className="field"><label>Status</label><Seg value={active ? "y" : "n"} onChange={(v) => setActive(v === "y")} options={[{ v: "y", label: "Active" }, { v: "n", label: "Inactive (hide)" }]} /></div>
+      )}
+    </Modal>
+  );
+}
+
+function AddEventForm({ event, onAdd, onClose }) {
+  const { kind, client } = event;
+  const [leadName, setLeadName] = useState("");
+  const [amount, setAmount] = useState(kind === "charge" ? client.ppsa_rate || 0 : 0);
+  const [when, setWhen] = useState(new Date().toISOString().slice(0, 10));
+  const labels = {
+    lead:   { title: "Add lead",     sub: "Use this to backfill a lead that didn't post to Slack", btn: "Add lead" },
+    charge: { title: "Add booking",  sub: "Use this to backfill a booked appointment that didn't post to Slack", btn: "Add booking" },
+    credit: { title: "Add no-show",  sub: "Records a credit / no-show against this client", btn: "Add no-show" },
+  };
+  const l = labels[kind];
+  const submit = () => {
+    if (!leadName.trim() && kind !== "lead") return;
+    onAdd({
+      channel_id: null,
+      ts: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      client_id: client.id,
+      kind: kind === "lead" ? "lead" : kind === "charge" ? "charge" : "credit",
+      lead_name: leadName.trim(),
+      amount: kind === "charge" ? Number(amount) || 0 : 0,
+      occurred_at: new Date(when + "T12:00:00Z").toISOString(),
+      raw: `[manual entry]`,
+      manual: true,
+    });
+  };
+  return (
+    <Modal title={l.title} sub={`${client.name} · ${l.sub}`} onClose={onClose} onSubmit={submit} submitLabel={l.btn}>
+      <div className="field"><label>Lead name {kind === "lead" && <span style={{ color: "#586679", textTransform: "none", letterSpacing: 0 }}>(optional)</span>}</label><input value={leadName} onChange={(e) => setLeadName(e.target.value)} placeholder="Jane Smith" autoFocus /></div>
+      {kind === "charge" && (
+        <div className="field"><label>Amount charged ($)</label><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
+      )}
+      <div className="field"><label>Date</label><input type="date" value={when} onChange={(e) => setWhen(e.target.value)} /></div>
     </Modal>
   );
 }
@@ -697,6 +799,8 @@ const css = `
 .flag.red{background:rgba(242,97,87,.1);color:#FCB5AE;}.flag.red svg{color:var(--red);}
 .flag.amber{background:rgba(251,191,36,.09);color:#F4D58A;}.flag.amber svg{color:var(--amber);}
 .flag.green{background:rgba(52,211,153,.08);color:#9CE6CD;}.flag.green svg{color:var(--green);}
+.add-event-row{display:flex;gap:6px;margin-top:11px;padding-top:11px;border-top:1px solid var(--line2);}
+.btn.small{padding:5px 9px;font-size:11.5px;}
 .foot{padding:18px 22px 28px;color:var(--faint);font-size:11px;border-top:1px solid var(--line2);}
 
 .team{padding:20px 22px 40px;}
