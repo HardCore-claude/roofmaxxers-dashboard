@@ -107,9 +107,10 @@ function Dashboard({ user, profile }) {
   const [openId, setOpenId] = useState(null);
   const [sortKey, setSortKey] = useState("risk");
   const [addClient, setAddClient] = useState(false);
-  const [editClient, setEditClient] = useState(null); // the client object being edited
+  const [editClient, setEditClient] = useState(null);
   const [addMember, setAddMember] = useState(false);
-  const [addEvent, setAddEvent] = useState(null); // { kind, client }
+  const [addEvent, setAddEvent] = useState(null);
+  const [editSpend, setEditSpend] = useState(null); // client object
   const [team, setTeam] = useState([]);
   const [refreshTick, setRefreshTick] = useState(0);
   const [lastSync, setLastSync] = useState(new Date());
@@ -165,10 +166,7 @@ function Dashboard({ user, profile }) {
       <header className="bar">
         <div className="brand">
           <img className="logo-img" src={LOGO_URI} alt="Roofmaxxers" />
-          <div>
-            <div className="brand-name">ROOFMAXXERS</div>
-            <div className="brand-sub">PPSA Command</div>
-          </div>
+          <div className="brand-sub-only">PPSA Command</div>
           <nav className="nav">
             <button className={view === "dash" ? "on" : ""} onClick={() => setView("dash")}>Performance</button>
             <button className={view === "team" ? "on" : ""} onClick={() => setView("team")}>Team</button>
@@ -185,7 +183,9 @@ function Dashboard({ user, profile }) {
             <RefreshCw size={13} /> {syncLabel}
           </button>
           <div className="me" title={user.email}>
-            <span className="avatar sm" style={{ background: avatarColor(profile.name) }}>{initials(profile.name)}</span>
+            {profile.avatar_url
+              ? <img className="avatar sm img" src={profile.avatar_url} alt={profile.name} />
+              : <span className="avatar sm" style={{ background: avatarColor(profile.name) }}>{initials(profile.name)}</span>}
             <button className="logout" onClick={() => supabase.auth.signOut()} title="Sign out"><LogOut size={13} /></button>
           </div>
         </div>
@@ -284,7 +284,8 @@ function Dashboard({ user, profile }) {
                   </button>
                   {open && <Detail d={d} a={a} flags={flags} isAdmin={isAdmin} period={period}
                     onAddEvent={(kind, client) => setAddEvent({ kind, client })}
-                    onEditClient={() => setEditClient(d)} />}
+                    onEditClient={() => setEditClient(d)}
+                    onEditSpend={() => setEditSpend(d)} />}
                 </div>
               );
             })}
@@ -293,7 +294,7 @@ function Dashboard({ user, profile }) {
           <footer className="foot">Revenue is real ForceCharge dollars (charges − credits) · Ad spend pulled from Meta · Updates every 15 min</footer>
         </>
       ) : (
-        <TeamView team={team} isAdmin={isAdmin} onAdd={() => setAddMember(true)} onChange={() => setRefreshTick((t) => t + 1)} />
+        <TeamView team={team} isAdmin={isAdmin} currentUserId={user.id} onAdd={() => setAddMember(true)} onChange={() => setRefreshTick((t) => t + 1)} />
       )}
 
       {addClient && <AddClientForm team={team} onClose={() => setAddClient(false)} onAdd={async (c) => {
@@ -309,6 +310,20 @@ function Dashboard({ user, profile }) {
         else setRefreshTick((t) => t + 1);
         setEditClient(null);
       }} />}
+      {editSpend && <AdSpendForm client={editSpend}
+        onSave={async (row) => {
+          const { error } = await supabase.from("meta_daily").upsert(row, { onConflict: "client_id,date" });
+          if (error) alert(error.message);
+          else setRefreshTick((t) => t + 1);
+          setEditSpend(null);
+        }}
+        onDelete={async (date) => {
+          const { error } = await supabase.from("meta_daily").delete().eq("client_id", editSpend.id).eq("date", date);
+          if (error) alert(error.message);
+          else setRefreshTick((t) => t + 1);
+          setEditSpend(null);
+        }}
+        onClose={() => setEditSpend(null)} />}
       {addEvent && <AddEventForm event={addEvent} onClose={() => setAddEvent(null)} onAdd={async (row) => {
         const { error } = await supabase.from("events").insert(row);
         if (error) alert(error.message);
@@ -333,7 +348,7 @@ function Stat({ label, value, sub, icon, big, tone }) {
   );
 }
 
-function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient }) {
+function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient, onEditSpend }) {
   if (d.pending) {
     return (
       <div className="detail pending-detail">
@@ -446,6 +461,7 @@ function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient }) {
             <button className="btn ghost small" onClick={() => onAddEvent("lead", d)}><Plus size={12} /> Add lead</button>
             <button className="btn ghost small" onClick={() => onAddEvent("charge", d)}><Plus size={12} /> Add booking</button>
             <button className="btn ghost small" onClick={() => onAddEvent("credit", d)}><Plus size={12} /> Add no-show</button>
+            <button className="btn ghost small" onClick={() => onEditSpend(d)}>Edit ad spend</button>
             <span style={{ flex: 1 }} />
             <button className="btn ghost small" onClick={onEditClient}>Edit client</button>
           </div>
@@ -467,10 +483,25 @@ function FunnelBar({ label, n, w, tone }) {
 const Conv = ({ pct, text, warn }) => <div className={"conv" + (warn ? " warn" : "")}>↓ {pct} <span>{text}</span></div>;
 
 /* ---------- team ---------- */
-function TeamView({ team, isAdmin, onAdd, onChange }) {
+function TeamView({ team, isAdmin, currentUserId, onAdd, onChange }) {
   const ROLES = ["Owner", "Admin / Partner", "Operations Manager", "CSM", "Project Manager", "Setter", "CSR"];
   const setRole = async (id, role) => { await supabase.from("profiles").update({ role }).eq("id", id); onChange(); };
   const setAccess = async (id, access) => { await supabase.from("profiles").update({ access }).eq("id", id); onChange(); };
+
+  const handleAvatarUpload = async (file) => {
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { alert("Image must be under 2 MB"); return; }
+    const ext = (file.name.split(".").pop() || "png").toLowerCase();
+    const path = `${currentUserId}/avatar.${ext}`;
+    const { error: upErr } = await supabase.storage.from("avatars").upload(path, file, { upsert: true, contentType: file.type });
+    if (upErr) { alert(upErr.message); return; }
+    const { data: pub } = supabase.storage.from("avatars").getPublicUrl(path);
+    // cache-bust with a timestamp so the image refreshes immediately
+    const url = `${pub.publicUrl}?v=${Date.now()}`;
+    const { error: profErr } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", currentUserId);
+    if (profErr) alert(profErr.message);
+    else onChange();
+  };
 
   return (
     <section className="team">
@@ -482,30 +513,45 @@ function TeamView({ team, isAdmin, onAdd, onChange }) {
         {isAdmin && <button className="btn primary" onClick={onAdd}><Plus size={15} /> Add team member</button>}
       </div>
       <div className="team-grid">
-        {team.map((m) => (
-          <div key={m.id} className="member">
-            <span className="avatar" style={{ background: avatarColor(m.name) }}>{initials(m.name)}</span>
-            <div className="member-info">
-              <div className="member-name">{m.name || "—"}</div>
-              {isAdmin ? (
-                <>
-                  <select className="member-edit" value={m.role || "CSR"} onChange={(e) => setRole(m.id, e.target.value)}>
-                    {ROLES.map((r) => <option key={r}>{r}</option>)}
-                  </select>
-                  <select className="member-edit" value={m.access || "ops"} onChange={(e) => setAccess(m.id, e.target.value)}>
-                    <option value="full">Full · financials</option>
-                    <option value="ops">Ops only</option>
-                  </select>
-                </>
-              ) : (
-                <>
-                  <div className="member-role">{m.role}</div>
-                  <div className={"access " + m.access}>{m.access === "full" ? "Full" : "Ops only"}</div>
-                </>
-              )}
+        {team.map((m) => {
+          const isMe = m.id === currentUserId;
+          return (
+            <div key={m.id} className="member">
+              <div className="avatar-wrap">
+                {m.avatar_url ? (
+                  <img className="avatar img" src={m.avatar_url} alt={m.name} />
+                ) : (
+                  <span className="avatar" style={{ background: avatarColor(m.name) }}>{initials(m.name)}</span>
+                )}
+                {isMe && (
+                  <label className="avatar-edit" title="Change my avatar">
+                    <Plus size={11} />
+                    <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => handleAvatarUpload(e.target.files?.[0])} />
+                  </label>
+                )}
+              </div>
+              <div className="member-info">
+                <div className="member-name">{m.name || "—"} {isMe && <span className="me-tag">you</span>}</div>
+                {isAdmin ? (
+                  <>
+                    <select className="member-edit" value={m.role || "CSR"} onChange={(e) => setRole(m.id, e.target.value)}>
+                      {ROLES.map((r) => <option key={r}>{r}</option>)}
+                    </select>
+                    <select className="member-edit" value={m.access || "ops"} onChange={(e) => setAccess(m.id, e.target.value)}>
+                      <option value="full">Full · financials</option>
+                      <option value="ops">Ops only</option>
+                    </select>
+                  </>
+                ) : (
+                  <>
+                    <div className="member-role">{m.role}</div>
+                    <div className={"access " + m.access}>{m.access === "full" ? "Full" : "Ops only"}</div>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -622,10 +668,11 @@ function AddEventForm({ event, onAdd, onClose }) {
   const [leadName, setLeadName] = useState("");
   const [amount, setAmount] = useState(kind === "charge" ? client.ppsa_rate || 0 : 0);
   const [when, setWhen] = useState(new Date().toISOString().slice(0, 10));
+  const [showed, setShowed] = useState("y"); // for charge: "y" showed, "n" no-show
   const labels = {
     lead:   { title: "Add lead",     sub: "Use this to backfill a lead that didn't post to Slack", btn: "Add lead" },
     charge: { title: "Add booking",  sub: "Use this to backfill a booked appointment that didn't post to Slack", btn: "Add booking" },
-    credit: { title: "Add no-show",  sub: "Records a credit / no-show against this client", btn: "Add no-show" },
+    credit: { title: "Add no-show",  sub: "Records a credit / no-show against a prior booking", btn: "Add no-show" },
   };
   const l = labels[kind];
   const submit = () => {
@@ -640,15 +687,55 @@ function AddEventForm({ event, onAdd, onClose }) {
       occurred_at: new Date(when + "T12:00:00Z").toISOString(),
       raw: `[manual entry]`,
       manual: true,
+      showed: kind === "charge" ? showed === "y" : null,
     });
   };
   return (
     <Modal title={l.title} sub={`${client.name} · ${l.sub}`} onClose={onClose} onSubmit={submit} submitLabel={l.btn}>
       <div className="field"><label>Lead name {kind === "lead" && <span style={{ color: "#586679", textTransform: "none", letterSpacing: 0 }}>(optional)</span>}</label><input value={leadName} onChange={(e) => setLeadName(e.target.value)} placeholder="Jane Smith" autoFocus /></div>
       {kind === "charge" && (
-        <div className="field"><label>Amount charged ($)</label><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
+        <>
+          <div className="field"><label>Amount charged ($)</label><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
+          <div className="field"><label>Did the appointment show?</label><Seg value={showed} onChange={setShowed} options={[{ v: "y", label: "Showed" }, { v: "n", label: "No-show" }]} /></div>
+        </>
       )}
       <div className="field"><label>Date</label><input type="date" value={when} onChange={(e) => setWhen(e.target.value)} /></div>
+    </Modal>
+  );
+}
+
+function AdSpendForm({ client, onSave, onDelete, onClose }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [date, setDate] = useState(today);
+  const [amount, setAmount] = useState(0);
+  const [mode, setMode] = useState("add"); // 'add' or 'remove'
+
+  const submit = () => {
+    const dollars = Number(amount);
+    if (!Number.isFinite(dollars)) return;
+    if (mode === "remove") {
+      onDelete(date);
+    } else {
+      onSave({ client_id: client.id, date, spend: dollars, meta_leads: 0, impressions: 0, clicks: 0, updated_at: new Date().toISOString() });
+    }
+  };
+
+  return (
+    <Modal
+      title="Edit ad spend"
+      sub={`${client.name} · adds or replaces the spend recorded for a specific day`}
+      onClose={onClose} onSubmit={submit} submitLabel={mode === "remove" ? "Remove spend" : "Save spend"}
+    >
+      <div className="field"><label>Mode</label><Seg value={mode} onChange={setMode} options={[{ v: "add", label: "Set / replace" }, { v: "remove", label: "Remove" }]} /></div>
+      <div className="field"><label>Date</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+      {mode === "add" && (
+        <div className="field"><label>Spend for that day ($)</label><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" /></div>
+      )}
+      <div className="hint">
+        {mode === "add"
+          ? "Replaces whatever Meta reported for that date. The next Meta pull will overwrite this if the campaign is matched, so use this for spend that isn't auto-tracked (renamed campaigns, manual ad-account spend, etc)."
+          : "Removes the recorded spend for that date entirely. Use this if Meta over-attributed spend to this client."}
+      </div>
     </Modal>
   );
 }
@@ -680,7 +767,8 @@ const css = `
 
 .bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 22px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,rgba(20,30,48,.6),rgba(10,14,22,.4));backdrop-filter:blur(8px);position:sticky;top:0;z-index:5;}
 .brand{display:flex;align-items:center;gap:11px;}
-.logo-img{height:30px;width:auto;display:block;}
+.logo-img{height:38px;width:auto;display:block;}
+.brand-sub-only{color:var(--faint);font-size:11px;letter-spacing:.04em;border-left:1px solid var(--line);padding-left:12px;}
 .brand-name{font-weight:700;letter-spacing:.18em;font-size:12.5px;}
 .brand-sub{color:var(--faint);font-size:11px;letter-spacing:.04em;}
 .nav{display:flex;gap:2px;margin-left:14px;padding-left:14px;border-left:1px solid var(--line);}
@@ -696,6 +784,13 @@ const css = `
 .me{display:flex;align-items:center;gap:6px;}
 .avatar{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:11.5px;flex-shrink:0;}
 .avatar.sm{width:28px;height:28px;font-size:10.5px;}
+.avatar.img{object-fit:cover;background:#10151F;}
+.avatar-wrap{position:relative;flex-shrink:0;}
+.avatar-edit{position:absolute;bottom:-3px;right:-3px;width:18px;height:18px;border-radius:50%;
+  background:var(--brand);color:#fff;display:grid;place-items:center;cursor:pointer;
+  border:2px solid var(--panel);transition:transform .15s;}
+.avatar-edit:hover{transform:scale(1.15);}
+.me-tag{font-size:9.5px;color:var(--brand2);background:rgba(11,149,232,.15);padding:1px 6px;border-radius:4px;margin-left:6px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;vertical-align:middle;}
 .logout{background:var(--panel);border:1px solid var(--line);color:var(--dim);border-radius:8px;width:28px;height:28px;display:grid;place-items:center;cursor:pointer;}
 .logout:hover{color:var(--text);}
 
