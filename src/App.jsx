@@ -114,7 +114,7 @@ function Dashboard({ user, profile }) {
   const [refreshTick, setRefreshTick] = useState(0);
   const [lastSync, setLastSync] = useState(new Date());
 
-  const { rows: data, loading, error } = useLiveData(period);
+  const { rows: data, loading, error } = useLiveData(period, refreshTick);
   const isAdmin = profile.access === "full";
 
   // refresh team list when on team view or when a member is added
