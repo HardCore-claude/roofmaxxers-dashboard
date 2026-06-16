@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { supabase } from "./supabase.js";
 
-export function useLiveData(periodDays) {
+export function useLiveData(periodDays, refreshKey = 0) {
   const [clients, setClients] = useState([]);
   const [events, setEvents] = useState([]);
   const [meta, setMeta] = useState([]);
@@ -36,7 +36,7 @@ export function useLiveData(periodDays) {
       }
     })();
     return () => { alive = false; };
-  }, [periodDays]);
+  }, [periodDays, refreshKey]);
 
   // derive per-client rollups
   const rows = useMemo(() => {
