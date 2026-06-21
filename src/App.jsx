@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Activity, RefreshCw, ChevronDown, ChevronRight, AlertTriangle, ShieldCheck,
-  DollarSign, Phone, CalendarCheck, Eye, Zap, Wallet, Target, Plus, X, LogOut, Clock
+  DollarSign, Phone, CalendarCheck, Eye, Zap, Wallet, Target, Plus, X, LogOut, Clock, Edit2
 } from "lucide-react";
 import { LineChart, Line, ResponsiveContainer } from "recharts";
 import { supabase } from "./supabase.js";
@@ -40,14 +40,20 @@ function assess(d) {
       else if (d.cpl > 0.85 * cplCeiling) flags.push({ level: "amber", metric: "CPL", msg: "CPL climbing — watch creatives" });
     }
   }
-  const br = d.target_booked ? d.booked / d.target_booked : 1;
-  if (br < 0.6) flags.push({ level: "red", metric: "Bookings", msg: "Bookings low — push setter on follow-ups" });
-  else if (br < 0.85) flags.push({ level: "amber", metric: "Bookings", msg: "Bookings under target — tighten follow-up" });
-  const lr = d.target_leads ? d.leads / d.target_leads : 1;
-  if (lr < 0.6) flags.push({ level: "red", metric: "Leads", msg: "Leads low — refresh creative or raise budget" });
-  else if (lr < 0.85) flags.push({ level: "amber", metric: "Leads", msg: "Leads under target — refresh creative" });
-  if (d.booked >= 5 && d.showRate < 0.6) flags.push({ level: "red", metric: "Show rate", msg: "Show rate low — confirm and remind appts" });
-  else if (d.booked >= 5 && d.showRate < 0.68) flags.push({ level: "amber", metric: "Show rate", msg: "Show rate slipping — add reminders" });
+  // Bookings / leads / show-rate are PPSA-style success metrics — a pure
+  // Retainer client isn't paid per show, so these targets don't apply to them.
+  // Combo clients still have a PPSA component, so they're included.
+  const isPpsaMetric = d.type === "PPSA" || d.type === "Combo";
+  if (isPpsaMetric) {
+    const br = d.target_booked ? d.booked / d.target_booked : 1;
+    if (br < 0.6) flags.push({ level: "red", metric: "Bookings", msg: "Bookings low — push setter on follow-ups" });
+    else if (br < 0.85) flags.push({ level: "amber", metric: "Bookings", msg: "Bookings under target — tighten follow-up" });
+    const lr = d.target_leads ? d.leads / d.target_leads : 1;
+    if (lr < 0.6) flags.push({ level: "red", metric: "Leads", msg: "Leads low — refresh creative or raise budget" });
+    else if (lr < 0.85) flags.push({ level: "amber", metric: "Leads", msg: "Leads under target — refresh creative" });
+    if (d.booked >= 5 && d.showRate < 0.6) flags.push({ level: "red", metric: "Show rate", msg: "Show rate low — confirm and remind appts" });
+    else if (d.booked >= 5 && d.showRate < 0.68) flags.push({ level: "amber", metric: "Show rate", msg: "Show rate slipping — add reminders" });
+  }
 
   let level;
   if (!d.we_pay_spend) level = "green";
@@ -60,6 +66,7 @@ function assess(d) {
   const red = flags.find((f) => f.level === "red"), amber = flags.find((f) => f.level === "amber");
   const headline =
     !d.we_pay_spend && level === "green" && !red && !amber ? "Client-funded — no ad risk to RM" :
+    d.type === "Retainer" && level === "green" && !red && !amber ? "Retainer — on track" :
     red ? red.msg : amber ? amber.msg : "Profitable — scale spend";
   return { level, flags, headline };
 }
@@ -483,10 +490,57 @@ function FunnelBar({ label, n, w, tone }) {
 const Conv = ({ pct, text, warn }) => <div className={"conv" + (warn ? " warn" : "")}>↓ {pct} <span>{text}</span></div>;
 
 /* ---------- team ---------- */
+function NameField({ value, canEdit, isMe, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+
+  if (!canEdit) {
+    return <div className="member-name">{value || "—"}{isMe && <span className="me-tag">you</span>}</div>;
+  }
+  if (editing) {
+    return (
+      <div className="member-name-edit">
+        <input
+          className="member-name-input"
+          value={draft}
+          autoFocus
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { onSave(draft); setEditing(false); }
+            if (e.key === "Escape") { setDraft(value); setEditing(false); }
+          }}
+          onBlur={() => { onSave(draft); setEditing(false); }}
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="member-name editable" onClick={() => setEditing(true)} title="Click to rename">
+      {value || "—"}{isMe && <span className="me-tag">you</span>}
+      <Edit2 size={11} className="name-edit-ic" />
+    </div>
+  );
+}
+
 function TeamView({ team, isAdmin, currentUserId, onAdd, onChange }) {
   const ROLES = ["Owner", "Admin / Partner", "Operations Manager", "CSM", "Project Manager", "Setter", "CSR"];
-  const setRole = async (id, role) => { await supabase.from("profiles").update({ role }).eq("id", id); onChange(); };
-  const setAccess = async (id, access) => { await supabase.from("profiles").update({ access }).eq("id", id); onChange(); };
+  const setRole = async (id, role) => {
+    const { error } = await supabase.from("profiles").update({ role }).eq("id", id);
+    if (error) { alert("Couldn't update role: " + error.message); return; }
+    onChange();
+  };
+  const setAccess = async (id, access) => {
+    const { error } = await supabase.from("profiles").update({ access }).eq("id", id);
+    if (error) { alert("Couldn't update access: " + error.message); return; }
+    onChange();
+  };
+  const setName = async (id, name) => {
+    if (!name.trim()) return;
+    const { error } = await supabase.from("profiles").update({ name: name.trim() }).eq("id", id);
+    if (error) { alert("Couldn't update name: " + error.message); return; }
+    onChange();
+  };
 
   const handleAvatarUpload = async (file) => {
     if (!file) return;
@@ -531,7 +585,12 @@ function TeamView({ team, isAdmin, currentUserId, onAdd, onChange }) {
                 )}
               </div>
               <div className="member-info">
-                <div className="member-name">{m.name || "—"} {isMe && <span className="me-tag">you</span>}</div>
+                <NameField
+                  value={m.name || ""}
+                  canEdit={isMe || isAdmin}
+                  isMe={isMe}
+                  onSave={(name) => setName(m.id, name)}
+                />
                 {isAdmin ? (
                   <>
                     <select className="member-edit" value={m.role || "CSR"} onChange={(e) => setRole(m.id, e.target.value)}>
@@ -908,6 +967,13 @@ const css = `
 .member .avatar{width:40px;height:40px;border-radius:10px;font-size:14px;}
 .member-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;}
 .member-name{font-weight:600;font-size:13.5px;}
+.member-name.editable{cursor:pointer;display:flex;align-items:center;gap:6px;}
+.member-name.editable:hover{color:var(--brand2);}
+.member-name.editable:hover .name-edit-ic{opacity:1;}
+.name-edit-ic{opacity:0;color:var(--faint);transition:opacity .15s;flex-shrink:0;}
+.member-name-edit{display:flex;}
+.member-name-input{background:var(--panel);border:1px solid var(--brand);color:var(--text);border-radius:6px;
+  padding:4px 7px;font-family:inherit;font-size:13.5px;font-weight:600;width:100%;outline:none;}
 .member-role{color:var(--dim);font-size:12px;}
 .member-edit{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px;font-family:inherit;font-size:11.5px;width:100%;}
 .access{font-size:10.5px;display:inline-block;padding:3px 7px;border-radius:5px;}
