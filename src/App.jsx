@@ -125,6 +125,7 @@ function Dashboard({ user, profile }) {
   const [addMember, setAddMember] = useState(false);
   const [addEvent, setAddEvent] = useState(null);
   const [editSpend, setEditSpend] = useState(null); // client object
+  const [removeBooking, setRemoveBooking] = useState(null); // client object
   const [team, setTeam] = useState([]);
   const [refreshTick, setRefreshTick] = useState(0);
   const [lastSync, setLastSync] = useState(new Date());
@@ -306,7 +307,8 @@ function Dashboard({ user, profile }) {
                         .eq("id", eventId);
                       if (error) alert(error.message);
                       else setRefreshTick((t) => t + 1);
-                    }} />}
+                    }}
+                    onRemoveBooking={() => setRemoveBooking(d)} />}
                 </div>
               );
             })}
@@ -355,6 +357,9 @@ function Dashboard({ user, profile }) {
         alert("To add a real teammate: have them sign in once at the login screen — then you can change their role here. (Email invites coming.)");
         setAddMember(false);
       }} />}
+      {removeBooking && <RemoveBookingForm client={removeBooking}
+        onClose={() => setRemoveBooking(null)}
+        onDeleted={() => setRefreshTick((t) => t + 1)} />}
     </div>
   );
 }
@@ -369,7 +374,102 @@ function Stat({ label, value, sub, icon, big, tone }) {
   );
 }
 
-function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient, onEditSpend, onResolvePending }) {
+function RemoveBookingForm({ client, onClose, onDeleted }) {
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from("events")
+        .select("*")
+        .eq("client_id", client.id)
+        .in("kind", ["charge", "pending_charge"])
+        .order("occurred_at", { ascending: false })
+        .limit(50);
+      if (error) { alert(error.message); setRows([]); }
+      else setRows(data || []);
+    })();
+  }, [client.id]);
+
+  const del = async (id) => {
+    if (busy) return;
+    setBusy(true);
+    const { error } = await supabase.from("events").delete().eq("id", id);
+    setBusy(false);
+    if (error) { alert(error.message); return; }
+    setRows((r) => r.filter((x) => x.id !== id));
+    onDeleted();
+  };
+
+  const kindLabel = (e) =>
+    e.kind === "pending_charge"
+      ? (e.resolved_as === "collected" ? "Collected" : e.resolved_as === "written_off" ? "Written off" : "Pending")
+      : (e.manual && e.showed === false ? "No-show" : "Booking");
+
+  return (
+    <Modal title="Remove booking" sub={`${client.name} · delete a booking that was added by mistake or double-counted`} onClose={onClose} onSubmit={onClose} submitLabel="Done">
+      {rows === null ? (
+        <div className="hint">Loading bookings…</div>
+      ) : rows.length === 0 ? (
+        <div className="hint">No bookings recorded for this client yet.</div>
+      ) : (
+        <div className="remove-list">
+          {rows.map((e) => (
+            <div key={e.id} className="remove-row">
+              <span className="remove-name">{e.lead_name || "—"}</span>
+              <span className={"remove-kind " + (e.kind === "pending_charge" && !e.resolved_at ? "pending" : "")}>{kindLabel(e)}</span>
+              <span className="remove-amount mono">{money(e.amount)}</span>
+              <span className="remove-date">{(e.occurred_at || "").slice(0, 10)}</span>
+              <button className="btn ghost small danger" disabled={busy} onClick={() => del(e.id)}>Delete</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="hint" style={{ marginTop: 10 }}>Deleting a booking permanently removes it. The client's booked count, show rate, and revenue update immediately.</div>
+    </Modal>
+  );
+}
+
+function ManualMenu({ onPick }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [open]);
+  const items = [
+    { id: "lead",           label: "Add lead" },
+    { id: "charge",         label: "Add booking" },
+    { id: "pending_charge", label: "Showed, not charged" },
+    { id: "credit",         label: "Add no-show" },
+    { id: "remove",         label: "Remove booking", danger: true },
+    { id: "spend",          label: "Edit ad spend", divider: true },
+  ];
+  return (
+    <div className="manual-menu" onClick={(e) => e.stopPropagation()}>
+      <button className="btn ghost small" onClick={() => setOpen((o) => !o)}>
+        <Plus size={12} /> Manual Metrics <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div className="manual-dropdown">
+          {items.map((it) => (
+            <button
+              key={it.id}
+              className={"manual-item" + (it.danger ? " danger" : "") + (it.divider ? " divider" : "")}
+              onClick={() => { setOpen(false); onPick(it.id); }}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient, onEditSpend, onResolvePending, onRemoveBooking }) {
   if (d.pending) {
     return (
       <div className="detail pending-detail">
@@ -496,11 +596,13 @@ function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient, onEdit
         ))}
         {isAdmin && (
           <div className="add-event-row">
-            <button className="btn ghost small" onClick={() => onAddEvent("lead", d)}><Plus size={12} /> Add lead</button>
-            <button className="btn ghost small" onClick={() => onAddEvent("charge", d)}><Plus size={12} /> Add booking</button>
-            <button className="btn ghost small" onClick={() => onAddEvent("pending_charge", d)}><Plus size={12} /> Showed, not charged</button>
-            <button className="btn ghost small" onClick={() => onAddEvent("credit", d)}><Plus size={12} /> Add no-show</button>
-            <button className="btn ghost small" onClick={() => onEditSpend(d)}>Edit ad spend</button>
+            <ManualMenu
+              onPick={(action) => {
+                if (action === "remove") onRemoveBooking(d);
+                else if (action === "spend") onEditSpend(d);
+                else onAddEvent(action, d);
+              }}
+            />
             <span style={{ flex: 1 }} />
             <button className="btn ghost small" onClick={onEditClient}>Edit client</button>
           </div>
@@ -989,8 +1091,27 @@ const css = `
 .flag.red{background:rgba(242,97,87,.1);color:#FCB5AE;}.flag.red svg{color:var(--red);}
 .flag.amber{background:rgba(251,191,36,.09);color:#F4D58A;}.flag.amber svg{color:var(--amber);}
 .flag.green{background:rgba(52,211,153,.08);color:#9CE6CD;}.flag.green svg{color:var(--green);}
-.add-event-row{display:flex;gap:6px;margin-top:11px;padding-top:11px;border-top:1px solid var(--line2);flex-wrap:wrap;}
+.add-event-row{display:flex;gap:6px;margin-top:11px;padding-top:11px;border-top:1px solid var(--line2);flex-wrap:wrap;align-items:center;}
 .btn.small{padding:5px 9px;font-size:11.5px;}
+.btn.ghost.small.danger{color:#F26157;border-color:rgba(242,97,87,.3);}
+.btn.ghost.small.danger:hover{border-color:var(--red);background:rgba(242,97,87,.08);}
+.manual-menu{position:relative;}
+.manual-dropdown{position:absolute;top:calc(100% + 5px);left:0;z-index:20;background:var(--ink2);
+  border:1px solid var(--line);border-radius:10px;padding:5px;min-width:185px;
+  box-shadow:0 16px 40px -12px rgba(0,0,0,.7);display:flex;flex-direction:column;gap:1px;}
+.manual-item{background:none;border:none;color:var(--text);text-align:left;padding:8px 11px;border-radius:7px;
+  font-family:inherit;font-size:12.5px;cursor:pointer;}
+.manual-item:hover{background:var(--panel2);}
+.manual-item.danger{color:#F26157;}
+.manual-item.divider{border-top:1px solid var(--line2);margin-top:4px;padding-top:10px;}
+.remove-list{display:flex;flex-direction:column;gap:2px;max-height:340px;overflow-y:auto;}
+.remove-row{display:grid;grid-template-columns:1.3fr .7fr .6fr .7fr auto;gap:9px;align-items:center;
+  font-size:12px;padding:8px 4px;border-bottom:1px solid var(--line2);}
+.remove-name{color:var(--text);font-weight:500;}
+.remove-kind{color:var(--faint);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;}
+.remove-kind.pending{color:var(--amber);}
+.remove-amount{color:var(--dim);}
+.remove-date{color:var(--faint);}
 .pending-collect{border-color:#3A3320;background:linear-gradient(180deg,rgba(251,191,36,.06),var(--panel2));}
 .pending-collect .d-title{color:#F4D58A;}
 .pending-row{display:grid;grid-template-columns:1.3fr .8fr .8fr auto;gap:10px;align-items:center;font-size:12px;padding:7px 0;border-top:1px solid var(--line2);}
