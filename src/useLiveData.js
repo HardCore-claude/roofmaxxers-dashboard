@@ -47,15 +47,25 @@ export function useLiveData(periodDays, refreshKey = 0) {
       const leads = ce.filter((e) => e.kind === "lead").length;
       const charges = ce.filter((e) => e.kind === "charge");
       const credits = ce.filter((e) => e.kind === "credit");
-      const booked = charges.length;
+      // "showed but card declined/funds low" — the appointment happened
+      // (counts toward booked + showed) but the dollars aren't real revenue
+      // until someone marks it collected.
+      const pendingCharges = ce.filter((e) => e.kind === "pending_charge" && !e.resolved_at);
+      const collected = ce.filter((e) => e.kind === "pending_charge" && e.resolved_as === "collected");
+      const writtenOff = ce.filter((e) => e.kind === "pending_charge" && e.resolved_as === "written_off");
+
+      const booked = charges.length + pendingCharges.length + collected.length + writtenOff.length;
       // showed = total bookings minus credits (default ForceCharge behavior).
       // For manually-added bookings, the user explicitly sets the `showed` flag,
       // which is a stronger signal than the credit-count subtraction. We honor
       // that: subtract no-shows (showed=false) AND credits.
       const manualNoShows = charges.filter((e) => e.manual && e.showed === false).length;
       const showed = booked - credits.length - manualNoShows;
-      const charged = charges.reduce((s, e) => s + Number(e.amount || 0), 0);
+      const charged = charges.reduce((s, e) => s + Number(e.amount || 0), 0)
+        + collected.reduce((s, e) => s + Number(e.amount || 0), 0); // collected pending charges count as real revenue now
       const credited = credits.reduce((s, e) => s + Number(e.amount || 0), 0);
+      const pendingAmount = pendingCharges.reduce((s, e) => s + Number(e.amount || 0), 0);
+      const writtenOffAmount = writtenOff.reduce((s, e) => s + Number(e.amount || 0), 0);
 
       const spend = cm.reduce((s, m) => s + Number(m.spend || 0), 0);
       const meta_leads = cm.reduce((s, m) => s + Number(m.meta_leads || 0), 0);
@@ -69,7 +79,9 @@ export function useLiveData(periodDays, refreshKey = 0) {
       const showRate = booked ? showed / booked : 0;
       const bookRate = leads ? booked / leads : 0;
 
-      // revenue = actual charges minus credited dollars (ForceCharge truth)
+      // revenue = actual charges minus credited dollars (ForceCharge truth).
+      // Pending (uncollected) charges are intentionally excluded — they're
+      // not real money until collected or written off.
       const revenue = (charged - credited) + (c.type === "Retainer" || c.type === "Combo" ? Number(c.retainer || 0) : 0);
       const ourAdCost = c.we_pay_spend ? spend : 0;
       const margin = revenue - ourAdCost;
@@ -88,6 +100,7 @@ export function useLiveData(periodDays, refreshKey = 0) {
         spend, meta_leads, impressions, clicks,
         cpl, cpb, cps, showRate, bookRate,
         revenue, ourAdCost, margin, marginPct, beCpl, headroom, pending,
+        pendingCharges, pendingAmount, writtenOffAmount,
         // daily series for the sparkline (margin shape)
         daily: buildDaily(ce, cm, c, periodDays),
       };
