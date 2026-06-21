@@ -55,6 +55,13 @@ function assess(d) {
     else if (d.booked >= 5 && d.showRate < 0.68) flags.push({ level: "amber", metric: "Show rate", msg: "Show rate slipping — add reminders" });
   }
 
+  // Pending (uncollected) charges — appointments that showed but the
+  // card declined / funds were low. Worth a visible nudge, not a hard red,
+  // since the client did show and this is a collections task, not an ad problem.
+  if (d.pendingAmount > 0) {
+    flags.push({ level: "amber", metric: "Pending collection", msg: `${money(d.pendingAmount)} owed from showed appointments — follow up on payment` });
+  }
+
   let level;
   if (!d.we_pay_spend) level = "green";
   else if (d.marginPct < -0.05) level = "red";
@@ -292,7 +299,14 @@ function Dashboard({ user, profile }) {
                   {open && <Detail d={d} a={a} flags={flags} isAdmin={isAdmin} period={period}
                     onAddEvent={(kind, client) => setAddEvent({ kind, client })}
                     onEditClient={() => setEditClient(d)}
-                    onEditSpend={() => setEditSpend(d)} />}
+                    onEditSpend={() => setEditSpend(d)}
+                    onResolvePending={async (eventId, resolvedAs) => {
+                      const { error } = await supabase.from("events")
+                        .update({ resolved_at: new Date().toISOString(), resolved_as: resolvedAs })
+                        .eq("id", eventId);
+                      if (error) alert(error.message);
+                      else setRefreshTick((t) => t + 1);
+                    }} />}
                 </div>
               );
             })}
@@ -355,7 +369,7 @@ function Stat({ label, value, sub, icon, big, tone }) {
   );
 }
 
-function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient, onEditSpend }) {
+function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient, onEditSpend, onResolvePending }) {
   if (d.pending) {
     return (
       <div className="detail pending-detail">
@@ -450,6 +464,23 @@ function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient, onEdit
         )}
       </div>
 
+      {isAdmin && d.pendingCharges && d.pendingCharges.length > 0 && (
+        <div className="d-flags pending-collect">
+          <div className="d-title">Pending collection · {money(d.pendingAmount)} owed</div>
+          {d.pendingCharges.map((e) => (
+            <div key={e.id} className="pending-row">
+              <span className="pending-name">{e.lead_name || "—"}</span>
+              <span className="pending-amount mono">{money(e.amount)}</span>
+              <span className="pending-date">{(e.occurred_at || "").slice(0, 10)}</span>
+              <span className="pending-actions">
+                <button className="btn ghost small" onClick={() => onResolvePending(e.id, "collected")}>Mark collected</button>
+                <button className="btn ghost small" onClick={() => onResolvePending(e.id, "written_off")}>Write off</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="d-flags">
         <div className="d-title">What to fix</div>
         {biggest && rank[biggest.tier] >= 2 && (
@@ -467,6 +498,7 @@ function Detail({ d, a, flags, isAdmin, period, onAddEvent, onEditClient, onEdit
           <div className="add-event-row">
             <button className="btn ghost small" onClick={() => onAddEvent("lead", d)}><Plus size={12} /> Add lead</button>
             <button className="btn ghost small" onClick={() => onAddEvent("charge", d)}><Plus size={12} /> Add booking</button>
+            <button className="btn ghost small" onClick={() => onAddEvent("pending_charge", d)}><Plus size={12} /> Showed, not charged</button>
             <button className="btn ghost small" onClick={() => onAddEvent("credit", d)}><Plus size={12} /> Add no-show</button>
             <button className="btn ghost small" onClick={() => onEditSpend(d)}>Edit ad spend</button>
             <span style={{ flex: 1 }} />
@@ -725,13 +757,14 @@ function AddClientForm({ onAdd, onClose, team, existing }) {
 function AddEventForm({ event, onAdd, onClose }) {
   const { kind, client } = event;
   const [leadName, setLeadName] = useState("");
-  const [amount, setAmount] = useState(kind === "charge" ? client.ppsa_rate || 0 : 0);
+  const [amount, setAmount] = useState((kind === "charge" || kind === "pending_charge") ? client.ppsa_rate || 0 : 0);
   const [when, setWhen] = useState(new Date().toISOString().slice(0, 10));
   const [showed, setShowed] = useState("y"); // for charge: "y" showed, "n" no-show
   const labels = {
-    lead:   { title: "Add lead",     sub: "Use this to backfill a lead that didn't post to Slack", btn: "Add lead" },
-    charge: { title: "Add booking",  sub: "Use this to backfill a booked appointment that didn't post to Slack", btn: "Add booking" },
-    credit: { title: "Add no-show",  sub: "Records a credit / no-show against a prior booking", btn: "Add no-show" },
+    lead:           { title: "Add lead",           sub: "Use this to backfill a lead that didn't post to Slack", btn: "Add lead" },
+    charge:         { title: "Add booking",        sub: "Use this to backfill a booked appointment that didn't post to Slack", btn: "Add booking" },
+    pending_charge: { title: "Showed, not charged", sub: "Appointment happened but the card declined or funds were low — tracked separately from real revenue until collected", btn: "Add pending charge" },
+    credit:         { title: "Add no-show",        sub: "Records a credit / no-show against a prior booking", btn: "Add no-show" },
   };
   const l = labels[kind];
   const submit = () => {
@@ -740,9 +773,9 @@ function AddEventForm({ event, onAdd, onClose }) {
       channel_id: null,
       ts: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       client_id: client.id,
-      kind: kind === "lead" ? "lead" : kind === "charge" ? "charge" : "credit",
+      kind,
       lead_name: leadName.trim(),
-      amount: kind === "charge" ? Number(amount) || 0 : 0,
+      amount: (kind === "charge" || kind === "pending_charge") ? Number(amount) || 0 : 0,
       occurred_at: new Date(when + "T12:00:00Z").toISOString(),
       raw: `[manual entry]`,
       manual: true,
@@ -757,6 +790,9 @@ function AddEventForm({ event, onAdd, onClose }) {
           <div className="field"><label>Amount charged ($)</label><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
           <div className="field"><label>Did the appointment show?</label><Seg value={showed} onChange={setShowed} options={[{ v: "y", label: "Showed" }, { v: "n", label: "No-show" }]} /></div>
         </>
+      )}
+      {kind === "pending_charge" && (
+        <div className="field"><label>Amount owed ($)</label><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
       )}
       <div className="field"><label>Date</label><input type="date" value={when} onChange={(e) => setWhen(e.target.value)} /></div>
     </Modal>
@@ -953,8 +989,16 @@ const css = `
 .flag.red{background:rgba(242,97,87,.1);color:#FCB5AE;}.flag.red svg{color:var(--red);}
 .flag.amber{background:rgba(251,191,36,.09);color:#F4D58A;}.flag.amber svg{color:var(--amber);}
 .flag.green{background:rgba(52,211,153,.08);color:#9CE6CD;}.flag.green svg{color:var(--green);}
-.add-event-row{display:flex;gap:6px;margin-top:11px;padding-top:11px;border-top:1px solid var(--line2);}
+.add-event-row{display:flex;gap:6px;margin-top:11px;padding-top:11px;border-top:1px solid var(--line2);flex-wrap:wrap;}
 .btn.small{padding:5px 9px;font-size:11.5px;}
+.pending-collect{border-color:#3A3320;background:linear-gradient(180deg,rgba(251,191,36,.06),var(--panel2));}
+.pending-collect .d-title{color:#F4D58A;}
+.pending-row{display:grid;grid-template-columns:1.3fr .8fr .8fr auto;gap:10px;align-items:center;font-size:12px;padding:7px 0;border-top:1px solid var(--line2);}
+.pending-row:first-of-type{border-top:none;}
+.pending-name{color:var(--text);font-weight:500;}
+.pending-amount{color:var(--amber);}
+.pending-date{color:var(--faint);}
+.pending-actions{display:flex;gap:6px;justify-self:end;}
 .foot{padding:18px 22px 28px;color:var(--faint);font-size:11px;border-top:1px solid var(--line2);}
 
 .team{padding:20px 22px 40px;}
